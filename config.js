@@ -9,7 +9,7 @@ const APP_CONFIG = {
   // "Authorized JavaScript origins". No client secret is needed — this
   // app uses the browser-side token flow, which is the correct/safe
   // approach for a site with no backend (GitHub Pages, HF static Spaces).
-  GOOGLE_CLIENT_ID: "YOUR_CLIENT_ID.apps.googleusercontent.com",
+  GOOGLE_CLIENT_ID: "445375462639-kah8ol3qf5ok3ianf3fm74gj8712j9cq.apps.googleusercontent.com",
 
   // Calendar scope — only touches events this app creates, not your whole calendar.
   CALENDAR_SCOPE: "https://www.googleapis.com/auth/calendar.events",
