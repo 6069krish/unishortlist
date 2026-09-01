@@ -155,6 +155,38 @@
       </div>
 
       <div class="settings-block">
+        <h2>AI scouting — free option</h2>
+        <p class="settings-line">
+          Optional. A free Gemini API key (from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>,
+          no billing needed) lets the app tidy up whatever a page's free scan
+          finds into clean bullet points. Without this key, "Scout (free)"
+          still works — it just shows raw keyword matches instead of a
+          cleaned-up summary. Stored only in this browser.
+        </p>
+        <div class="settings-actions">
+          <input type="password" id="geminiKeyInput" class="text-input" placeholder="AIza..." style="width:280px" />
+          <button id="saveGeminiKeyBtn" class="btn btn-ink btn-small">Save key</button>
+          <button id="clearGeminiKeyBtn" class="btn btn-ghost btn-small">Remove</button>
+        </div>
+        <p class="settings-line" id="geminiKeyStatus" style="margin-top:10px; margin-bottom:0;"></p>
+      </div>
+
+      <div class="settings-block">
+        <h2>AI scouting — deep scout (paid)</h2>
+        <p class="settings-line">
+          Optional. A paid Anthropic API key lets "Deep scout" run a live web
+          search for programs where you don't already have a direct page URL.
+          Costs a small amount per lookup, billed to your own account.
+        </p>
+        <div class="settings-actions">
+          <input type="password" id="apiKeyInput" class="text-input" placeholder="sk-ant-..." style="width:280px" />
+          <button id="saveApiKeyBtn" class="btn btn-ink btn-small">Save key</button>
+          <button id="clearApiKeyBtn" class="btn btn-ghost btn-small">Remove</button>
+        </div>
+        <p class="settings-line" id="apiKeyStatus" style="margin-top:10px; margin-bottom:0;"></p>
+      </div>
+
+      <div class="settings-block">
         <h2>Reminder timing</h2>
         <p class="settings-line">Days before each deadline that a popup reminder fires (comma-separated).</p>
         <div class="settings-actions">
@@ -197,9 +229,21 @@
         <label for="m_deadline">Application deadline</label>
         <input type="date" id="m_deadline" required />
       </div>
+
       <div class="field">
-        <label for="m_notes">Notes</label>
-        <textarea id="m_notes" rows="2"></textarea>
+        <label for="m_link">Program / admissions page URL <span style="text-transform:none;font-weight:400;">(for free scouting)</span></label>
+        <input type="url" id="m_link" placeholder="https://…" />
+      </div>
+
+      <div class="scout-row">
+        <button type="button" id="m_scoutFreeBtn" class="btn btn-forest btn-small">Scout (free)</button>
+        <button type="button" id="m_scoutBtn" class="btn btn-brass btn-small">Deep scout (paid, live search)</button>
+      </div>
+      <p id="m_scoutStatus" class="settings-line" style="margin:-4px 0 0;"></p>
+
+      <div class="field">
+        <label for="m_notes">Notes / requirements</label>
+        <textarea id="m_notes" rows="4"></textarea>
       </div>
       <label class="check-row">
         <input type="checkbox" id="m_syncNow" checked />

@@ -74,6 +74,49 @@ origins from step 1.)
 2. Upload `index.html`, `style.css`, `app.js`, `config.js`.
 3. Add the Space's URL origin to Authorized JavaScript origins the same way.
 
+## AI scouting (free-first)
+
+Google's own free search APIs are being wound down for new users in 2026, and
+there's no free public database of degree-specific admission requirements —
+so instead of routing every lookup through a paid search API, scouting works
+in two free-first tiers, plus an optional paid one for when you don't have a
+direct link:
+
+**1. Scout (free) — no key needed.** You give it the program's own admissions
+page URL (auto-filled when it came from search results). The app fetches
+that page through a free public CORS proxy (api.allorigins.win, with
+api.codetabs.com as a fallback if the first is down/rate-limited), strips it
+to plain text in your browser, and regex-scans it for deadline-shaped dates
+and common requirement keywords (IELTS, GPA, SOP, letters of recommendation,
+etc.). Zero cost, zero setup, works immediately.
+
+**2. Free AI cleanup — optional, still $0.** If you add a free
+[Google AI Studio](https://aistudio.google.com/apikey) Gemini API key in
+Settings, "Scout (free)" hands the *already-fetched* page text to Gemini's
+free tier (Flash-Lite, ~1,000 requests/day, no billing account needed) to
+turn the raw keyword hits into a clean summary. This deliberately avoids
+Google's paid "search grounding" fee — Gemini isn't searching the web here,
+it's just reading text your browser already pulled down.
+
+**3. Deep scout — optional, paid.** For a program where you don't have a
+direct URL, "Deep scout" (Settings → your own Anthropic API key) runs a live
+web search via Claude to find one. This is the only tier that costs real
+money, and it's usually a fraction of a cent per lookup — use it as a
+fallback, not the default.
+
+**Caveats, honestly:**
+- Free public CORS proxies are exactly that — free and public. They're
+  sometimes slow, occasionally down, and rate-limited. The app tries two and
+  tells you plainly if both fail; retry, or paste a different/more direct URL.
+- Some university sites block proxied/bot-like requests entirely — if a page
+  won't fetch, that's usually why.
+- The regex keyword scan is dumb by design (it's just pattern-matching, not
+  reading comprehension) — always sanity-check what it finds. The Gemini
+  cleanup tier is considerably more reliable if you can spare 30 seconds to
+  grab a free key.
+- Every result — free or paid — is a starting point. Confirm dates and
+  requirements on the university's own page before you rely on them.
+
 ## How each part works
 
 - **Search** — university name/country lookup uses the free, keyless

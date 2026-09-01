@@ -13,6 +13,11 @@ function loadShortlist(){
 function saveShortlist(list){
   localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
 }
+const API_KEY_STORAGE = "ledger_anthropic_key_v1";
+function loadApiKey(){ return localStorage.getItem(API_KEY_STORAGE) || ""; }
+function saveApiKey(key){ localStorage.setItem(API_KEY_STORAGE, key); }
+function clearApiKey(){ localStorage.removeItem(API_KEY_STORAGE); }
+
 function loadReminderDays(){
   try{
     const raw = JSON.parse(localStorage.getItem(REMINDER_KEY));
@@ -191,6 +196,211 @@ function syncAll(){
 }
 
 /* =========================================================================
+   FREE SCOUTING PIPELINE
+   Step 1 (always free, no key): fetch the program's own page through a
+   public CORS proxy and regex-scan it for deadline dates + requirement
+   keywords. Step 2 (optional, still free): if a Gemini API key is set,
+   hand that already-fetched text to Gemini's free tier to structure it
+   cleanly — no paid "search grounding" involved, since we already have
+   the page text ourselves.
+========================================================================= */
+const GEMINI_KEY_STORAGE = "ledger_gemini_key_v1";
+function loadGeminiKey(){ return localStorage.getItem(GEMINI_KEY_STORAGE) || ""; }
+function saveGeminiKey(key){ localStorage.setItem(GEMINI_KEY_STORAGE, key); }
+function clearGeminiKey(){ localStorage.removeItem(GEMINI_KEY_STORAGE); }
+
+const CORS_PROXIES = [
+  (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+];
+
+async function fetchPageText(url){
+  let lastErr;
+  for (const build of CORS_PROXIES){
+    try{
+      const res = await fetch(build(url));
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      const html = await res.text();
+      if (!html || html.length < 50) throw new Error("empty response");
+      const text = html
+        .replace(/<script[\s\S]*?<\/script>/gi, " ")
+        .replace(/<style[\s\S]*?<\/style>/gi, " ")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/&nbsp;/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text.length < 100) throw new Error("page had no readable text");
+      return text.slice(0, 25000);
+    }catch(e){ lastErr = e; }
+  }
+  throw new Error("Couldn't reach that page through any free proxy — try a different URL, or use Deep scout instead");
+}
+
+const REQUIREMENT_KEYWORDS = [
+  "IELTS","TOEFL","GRE","GMAT","SAT","ACT","GPA",
+  "letter of recommendation","letters of recommendation","personal statement",
+  "statement of purpose","transcript","application fee","essay",
+  "portfolio","interview","work experience","reference","CV","resume",
+];
+const DEADLINE_WORDS = ["deadline","due date","due by","apply by","closes on","closing date","must be submitted"];
+const DATE_PATTERN = /\b(?:\d{1,2}\s+)?(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s*\d{4}\b|\b\d{1,2}\/\d{1,2}\/\d{2,4}\b|\b\d{4}-\d{2}-\d{2}\b/gi;
+
+function extractSignals(text){
+  const lower = text.toLowerCase();
+  const requirementHits = [...new Set(
+    REQUIREMENT_KEYWORDS.filter(k => lower.includes(k.toLowerCase()))
+  )];
+
+  const deadlineGuesses = [];
+  DEADLINE_WORDS.forEach(word => {
+    let idx = lower.indexOf(word);
+    while (idx !== -1 && deadlineGuesses.length < 5){
+      const windowText = text.slice(idx, idx + 140);
+      const dates = windowText.match(DATE_PATTERN);
+      if (dates) dates.forEach(d => deadlineGuesses.push(d.trim()));
+      idx = lower.indexOf(word, idx + word.length);
+    }
+  });
+
+  return {
+    requirements: requirementHits,
+    deadlineGuesses: [...new Set(deadlineGuesses)],
+  };
+}
+
+function tryParseDate(str){
+  const d = new Date(str);
+  if (isNaN(d)) return null;
+  return d.toISOString().slice(0,10);
+}
+
+async function geminiCleanup(university, degree, pageText){
+  const key = loadGeminiKey();
+  if (!key) return null;
+  const prompt = `Here is raw scraped text from a university admissions page for ${university} — ${degree}. Extract ONLY what's actually in this text. Respond with ONLY raw JSON, no markdown fences:
+{
+  "deadline": "YYYY-MM-DD or null if not clearly stated in the text",
+  "deadline_note": "short label or null",
+  "requirements": ["short bullet, your own words, up to 8"],
+  "confidence": "high" | "medium" | "low"
+}
+Text:
+"""${pageText.slice(0, 12000)}"""`;
+
+  const res = await fetch(
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": key },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+    }
+  );
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error?.message || `Gemini error (${res.status})`);
+  const raw = data?.candidates?.[0]?.content?.parts?.map(p => p.text).join("\n") || "";
+  const cleaned = raw.replace(/^```json\s*|^```\s*|```$/gm, "").trim();
+  try{ return JSON.parse(cleaned); }
+  catch(e){ return null; }
+}
+
+async function scoutFree(university, degree, url){
+  if (!url) throw new Error("Add a program/admissions page URL first");
+  const pageText = await fetchPageText(url);
+
+  const aiResult = await geminiCleanup(university, degree, pageText).catch(() => null);
+  if (aiResult){
+    return {
+      deadline: aiResult.deadline || null,
+      requirements: aiResult.requirements || [],
+      confidence: aiResult.confidence || "medium",
+      via: "Gemini (free tier) reading the fetched page",
+    };
+  }
+
+  // No Gemini key, or Gemini call failed — fall back to plain regex scan.
+  const signals = extractSignals(pageText);
+  const deadline = signals.deadlineGuesses.map(tryParseDate).find(Boolean) || null;
+  return {
+    deadline,
+    requirements: signals.requirements.map(k => `Mentions "${k}" on the page`),
+    confidence: deadline ? "medium" : "low",
+    via: "keyword scan (no AI)",
+  };
+}
+
+/* =========================================================================
+   AI SCOUTING  (bring-your-own Anthropic API key, called directly from
+   the browser — Claude + web search look up real requirements/deadlines)
+========================================================================= */
+async function scoutRequirements(university, degree){
+  const apiKey = loadApiKey();
+  if (!apiKey){
+    throw new Error("No API key set — add one in Settings → AI scouting");
+  }
+  if (!university || !degree){
+    throw new Error("Enter both a university and a degree first");
+  }
+
+  const prompt = `Find the current admission requirements and application deadline for this specific program:
+University: ${university}
+Degree/programme: ${degree}
+
+Search the university's own admissions pages if possible. Respond with ONLY raw JSON, no markdown fences, no commentary, matching exactly this shape:
+{
+  "deadline": "YYYY-MM-DD or null if you can't find a specific date",
+  "deadline_note": "short label, e.g. 'Fall 2027 intake, Round 1' or null",
+  "requirements": ["short bullet", "short bullet", "... up to 8"],
+  "confidence": "high" | "medium" | "low",
+  "source_url": "the single most authoritative URL you used, or null"
+}
+Keep each requirement bullet under 12 words, in your own words, not copied text. If you can't find a specific deadline, still return your best summary of requirements with "confidence": "low".`;
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 1500,
+      messages: [{ role: "user", content: prompt }],
+      tools: [{ type: "web_search_20250305", name: "web_search" }],
+    }),
+  });
+
+  const data = await res.json();
+  if (!res.ok){
+    const msg = data?.error?.message || `API error (${res.status})`;
+    throw new Error(msg);
+  }
+
+  const text = (data.content || [])
+    .filter(b => b.type === "text")
+    .map(b => b.text)
+    .join("\n")
+    .trim();
+
+  const cleaned = text.replace(/^```json\s*|^```\s*|```$/gm, "").trim();
+  let parsed;
+  try{ parsed = JSON.parse(cleaned); }
+  catch(e){ throw new Error("Got a response but couldn't parse it as JSON"); }
+
+  return parsed;
+}
+
+function formatScoutResult(result){
+  const lines = [];
+  if (result.requirements?.length) lines.push(result.requirements.map(r => "• " + r).join("\n"));
+  if (result.source_url) lines.push(`Source: ${result.source_url}`);
+  if (result.via) lines.push(`(via ${result.via}${result.confidence ? `, ${result.confidence} confidence` : ""} — verify on the official site)`);
+  else if (result.confidence) lines.push(`(confidence: ${result.confidence} — verify on the official site)`);
+  return lines.join("\n");
+}
+
+/* =========================================================================
    UNIVERSITY SEARCH  (Hipolabs open directory — name/country only)
 ========================================================================= */
 async function searchUniversities(name){
@@ -271,14 +481,68 @@ function openEntryModal(prefill){
   document.getElementById("m_degree").value = prefill.degree || "";
   document.getElementById("m_deadline").value = prefill.deadline || "";
   document.getElementById("m_notes").value = prefill.notes || "";
+  document.getElementById("m_link").value = prefill.link || "";
   document.getElementById("m_syncNow").checked = true;
-  modal.dataset.link = prefill.link || "";
+  document.getElementById("m_scoutStatus").textContent = "";
   modal.hidden = false;
   document.getElementById("m_university").focus();
 }
 function closeEntryModal(){ modal.hidden = true; }
 document.getElementById("modalCancel").addEventListener("click", closeEntryModal);
 modal.addEventListener("click", (e) => { if (e.target === modal) closeEntryModal(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !modal.hidden) closeEntryModal(); });
+
+document.getElementById("m_scoutFreeBtn").addEventListener("click", async () => {
+  const university = document.getElementById("m_university").value.trim();
+  const degree = document.getElementById("m_degree").value.trim();
+  const url = document.getElementById("m_link").value.trim();
+  const statusEl = document.getElementById("m_scoutStatus");
+  const btn = document.getElementById("m_scoutFreeBtn");
+  if (!url){ statusEl.textContent = "Add a program/admissions page URL above first."; return; }
+  statusEl.textContent = "Fetching the page and scanning it (free)…";
+  btn.disabled = true;
+  try{
+    const result = await scoutFree(university, degree, url);
+    if (result.deadline) document.getElementById("m_deadline").value = result.deadline;
+    const notesField = document.getElementById("m_notes");
+    const scoutText = formatScoutResult(result);
+    notesField.value = notesField.value ? notesField.value + "\n\n" + scoutText : scoutText;
+    statusEl.textContent = result.deadline
+      ? `Found a deadline (${result.confidence} confidence, ${result.via}).`
+      : `No confirmed deadline — added what the scan found (${result.confidence} confidence). Set the date yourself.`;
+  }catch(err){
+    statusEl.textContent = "";
+    toast(err.message, "error");
+  }finally{
+    btn.disabled = false;
+  }
+});
+
+document.getElementById("m_scoutBtn").addEventListener("click", async () => {
+  const university = document.getElementById("m_university").value.trim();
+  const degree = document.getElementById("m_degree").value.trim();
+  const statusEl = document.getElementById("m_scoutStatus");
+  const btn = document.getElementById("m_scoutBtn");
+  statusEl.textContent = "Searching official admissions pages…";
+  btn.disabled = true;
+  try{
+    const result = await scoutRequirements(university, degree);
+    if (result.deadline){
+      document.getElementById("m_deadline").value = result.deadline;
+    }
+    const notesField = document.getElementById("m_notes");
+    const scoutText = formatScoutResult(result);
+    notesField.value = notesField.value ? notesField.value + "\n\n" + scoutText : scoutText;
+    statusEl.textContent = result.deadline
+      ? `Found it — deadline filled in (${result.confidence} confidence).`
+      : `Couldn't confirm an exact deadline — requirements added (${result.confidence} confidence). Set the date yourself.`;
+  }catch(err){
+    statusEl.textContent = "";
+    toast(err.message, "error");
+  }finally{
+    btn.disabled = false;
+  }
+});
 
 document.getElementById("entryForm").addEventListener("submit", (e) => {
   e.preventDefault();
@@ -289,7 +553,7 @@ document.getElementById("entryForm").addEventListener("submit", (e) => {
     degree: document.getElementById("m_degree").value.trim(),
     deadline: document.getElementById("m_deadline").value,
     notes: document.getElementById("m_notes").value.trim(),
-    link: modal.dataset.link || "",
+    link: document.getElementById("m_link").value.trim(),
     synced: false,
     calendarEventId: null,
     createdAt: Date.now(),
@@ -370,6 +634,8 @@ function renderShortlist(){
           ${e.synced
             ? `<button class="btn btn-ghost btn-small" data-act="unsync" data-id="${e.id}">Remove reminder</button>`
             : `<button class="btn btn-forest btn-small" data-act="sync" data-id="${e.id}">Sync to Calendar</button>`}
+          <button class="btn btn-forest btn-small" data-act="scoutfree" data-id="${e.id}">Scout (free)</button>
+          <button class="btn btn-ghost btn-small" data-act="scout" data-id="${e.id}">Deep scout</button>
           <button class="btn btn-ghost btn-small" data-act="delete" data-id="${e.id}">Delete</button>
         </div>
         ${e.synced ? `<div class="card-synced-line">✓ Reminder set in Google Calendar</div>` : ""}
@@ -389,6 +655,50 @@ function renderShortlist(){
       renderShortlist();
       toast("Reminder removed");
     });
+  }));
+  grid.querySelectorAll("[data-act='scoutfree']").forEach(b => b.addEventListener("click", async () => {
+    const entry = shortlist.find(x => x.id === b.dataset.id);
+    if (!entry) return;
+    if (!entry.link){
+      const url = prompt("No page URL saved for this entry yet. Paste the admissions/program page URL to scan:");
+      if (!url) return;
+      entry.link = url.trim();
+      saveShortlist(shortlist);
+    }
+    b.textContent = "Scouting…";
+    b.disabled = true;
+    try{
+      const result = await scoutFree(entry.university, entry.degree, entry.link);
+      if (result.deadline && !entry.deadline) entry.deadline = result.deadline;
+      const scoutText = formatScoutResult(result);
+      entry.notes = entry.notes ? entry.notes + "\n\n" + scoutText : scoutText;
+      saveShortlist(shortlist);
+      renderShortlist();
+      toast(`Scanned page for ${entry.university}`, "success");
+    }catch(err){
+      toast(err.message, "error");
+      b.textContent = "Scout (free)";
+      b.disabled = false;
+    }
+  }));
+  grid.querySelectorAll("[data-act='scout']").forEach(b => b.addEventListener("click", async () => {
+    const entry = shortlist.find(x => x.id === b.dataset.id);
+    if (!entry) return;
+    b.textContent = "Scouting…";
+    b.disabled = true;
+    try{
+      const result = await scoutRequirements(entry.university, entry.degree);
+      if (result.deadline && !entry.deadline){ entry.deadline = result.deadline; }
+      const scoutText = formatScoutResult(result);
+      entry.notes = entry.notes ? entry.notes + "\n\n" + scoutText : scoutText;
+      saveShortlist(shortlist);
+      renderShortlist();
+      toast(`Requirements added for ${entry.university}`, "success");
+    }catch(err){
+      toast(err.message, "error");
+      b.textContent = "Deep scout";
+      b.disabled = false;
+    }
   }));
   grid.querySelectorAll("[data-act='delete']").forEach(b => b.addEventListener("click", async () => {
     const entry = shortlist.find(x => x.id === b.dataset.id);
@@ -555,6 +865,50 @@ document.getElementById("confirmImportBtn").addEventListener("click", () => {
 document.getElementById("authButton").addEventListener("click", () => ensureAuth(() => {}));
 document.getElementById("authButton2").addEventListener("click", () => ensureAuth(() => {}));
 document.getElementById("disconnectBtn").addEventListener("click", disconnectGoogle);
+
+function refreshApiKeyStatus(){
+  const key = loadApiKey();
+  document.getElementById("apiKeyStatus").textContent = key
+    ? `Key saved (ends in …${key.slice(-4)}). Deep scout is active.`
+    : "No key saved — Deep scout is off.";
+}
+refreshApiKeyStatus();
+
+document.getElementById("saveApiKeyBtn").addEventListener("click", () => {
+  const val = document.getElementById("apiKeyInput").value.trim();
+  if (!val){ toast("Paste a key first", "error"); return; }
+  saveApiKey(val);
+  document.getElementById("apiKeyInput").value = "";
+  refreshApiKeyStatus();
+  toast("API key saved to this browser", "success");
+});
+document.getElementById("clearApiKeyBtn").addEventListener("click", () => {
+  clearApiKey();
+  refreshApiKeyStatus();
+  toast("API key removed");
+});
+
+function refreshGeminiKeyStatus(){
+  const key = loadGeminiKey();
+  document.getElementById("geminiKeyStatus").textContent = key
+    ? `Key saved (ends in …${key.slice(-4)}). Free scout will use Gemini to clean up results.`
+    : "No key saved — free scout will show raw keyword matches instead.";
+}
+refreshGeminiKeyStatus();
+
+document.getElementById("saveGeminiKeyBtn").addEventListener("click", () => {
+  const val = document.getElementById("geminiKeyInput").value.trim();
+  if (!val){ toast("Paste a key first", "error"); return; }
+  saveGeminiKey(val);
+  document.getElementById("geminiKeyInput").value = "";
+  refreshGeminiKeyStatus();
+  toast("Gemini key saved to this browser", "success");
+});
+document.getElementById("clearGeminiKeyBtn").addEventListener("click", () => {
+  clearGeminiKey();
+  refreshGeminiKeyStatus();
+  toast("Gemini key removed");
+});
 
 document.getElementById("reminderDaysInput").value = reminderDays.join(", ");
 document.getElementById("saveReminderDaysBtn").addEventListener("click", () => {
